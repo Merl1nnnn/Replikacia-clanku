@@ -14,6 +14,8 @@ from xgboost import XGBClassifier
 import joblib
 import logging
 import gc
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # === ЛОГИРОВАНИЕ ===
 logging.basicConfig(level=logging.INFO)
@@ -156,6 +158,66 @@ def extract_features(model, X, preprocess_fn, batch_size=32):
         gc.collect()
     return np.array(features)
 
+def plot_confusion_matrix(cm, class_names):
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='YlGnBu', cbar=False,
+                xticklabels=class_names, yticklabels=class_names, linewidths=0.5, linecolor='gray')
+    plt.title("Confusion Matrix", fontsize=14)
+    plt.xlabel("Predicted Class", fontsize=12)
+    plt.ylabel("True Class", fontsize=12)
+    plt.xticks(rotation=45)
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+# Bar charts for precision, recall, f1-score per class
+def plot_classification_report(report_dict):
+    metrics = ['precision', 'recall', 'f1-score']
+    labels = list(report_dict.keys())[:-3]  # Skip 'accuracy', 'macro avg', 'weighted avg']
+
+    x = np.arange(len(labels))
+    width = 0.25
+
+    # Values
+    precision = [report_dict[label]['precision'] for label in labels]
+    recall = [report_dict[label]['recall'] for label in labels]
+    f1 = [report_dict[label]['f1-score'] for label in labels]
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    bars1 = ax.bar(x - width, precision, width, label='Precision', color='#1f77b4')
+    bars2 = ax.bar(x, recall, width, label='Recall', color='#2ca02c')
+    bars3 = ax.bar(x + width, f1, width, label='F1-score', color='#ff7f0e')
+
+    # Add value labels on top of bars
+    def add_labels(bars):
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.2f}',
+                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                        xytext=(0, 5),  # vertical offset
+                        textcoords="offset points",
+                        ha='center', va='bottom', fontsize=9)
+
+    add_labels(bars1)
+    add_labels(bars2)
+    add_labels(bars3)
+
+    # Add average lines
+    for metric_values, color in zip([precision, recall, f1], ['#1f77b4', '#2ca02c', '#ff7f0e']):
+        avg = np.mean(metric_values)
+        ax.axhline(avg, linestyle='--', color=color, alpha=0.3, label=f'{color.capitalize()} Avg: {avg:.2f}')
+
+    ax.set_ylabel('Score', fontsize=12)
+    ax.set_title('Classification Metrics per Class', fontsize=14, weight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha='right')
+    ax.set_ylim(0, 1.1)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    ax.legend(loc='upper right', fontsize=10)
+    plt.tight_layout()
+    plt.show()
+
 def main():
     X, y, class_map = load_npy_files()
     
@@ -232,8 +294,11 @@ def main():
 
     logger.info("Оценка модели...")
     y_pred = clf.predict(X_test_comb)
-    print(classification_report(y_test, y_pred, target_names=class_map.keys()))
-    print("Матрица ошибок:\n", confusion_matrix(y_test, y_pred))
+    cm = confusion_matrix(y_test, y_pred)
+    plot_confusion_matrix(cm, list(class_map.keys()))
+
+    report = classification_report(y_test, y_pred, target_names=class_map.keys(), output_dict=True)
+    plot_classification_report(report)
 
     # Удаляем тестовые данные после оценки
     del X_test_comb, y_test, y_pred
