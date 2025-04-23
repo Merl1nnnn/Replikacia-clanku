@@ -118,7 +118,7 @@ def save_npy_files(X, y, class_map, features_dir="features"):
     
     np.save(os.path.join(features_dir, "X.npy"), X)
     np.save(os.path.join(features_dir, "y.npy"), y)
-    with open(os.path.join(features_dir, "class_map.npy"), 'wb') as f:
+    with open(os.path.join("", "class_map.npy"), 'wb') as f:
         np.save(f, class_map)
 
 def load_npy_files(features_dir="features"):
