@@ -16,6 +16,7 @@ import logging
 import gc
 import matplotlib.pyplot as plt
 import seaborn as sns
+import random
 
 # === ЛОГИРОВАНИЕ ===
 logging.basicConfig(level=logging.INFO)
@@ -31,12 +32,11 @@ else:
     logger.warning("⚠️ GPU не найден. Используется CPU.")
 
 # === ПАРАМЕТРЫ ===
-IMG_SIZE = 200
+IMG_SIZE = 128
 DATASET_PATH = "grape_leaf_dataset"
-PART_OF_DATASET = 0.3  # используй только часть данных, чтобы не упасть по памяти
 SEED = 42
 np.random.seed(SEED)
-
+random.seed(SEED)
 # === ФУНКЦИИ ===
 
 def remove_background(image):
@@ -54,6 +54,13 @@ def preprocess_image(path):
     try:
         image = Image.open(path).convert("RGB")
         img = remove_background(image)
+
+        # 🔹 Приёмирование: просто сглаживаем яркость через размытие
+        img = cv2.blur(img, (3, 3))  # усреднение по 3x3 окну
+
+        # 🔸 Билатеральная фильтрация: мягкое сглаживание с сохранением границ
+        img = cv2.bilateralFilter(img, d=9, sigmaColor=75, sigmaSpace=75)
+
         resized = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
         return resized / 255.0
     except Exception as e:
@@ -81,79 +88,83 @@ def augment_image(image, class_idx):
     image = np.expand_dims(image, 0)
     return [datagen.flow(image, batch_size=1).__next__()[0]]
 
-def load_dataset(path, max_per_class=750, max_per_difficult_class=1500):
-    X, y = [], []
+def load_dataset(path, max_per_class=500, max_per_difficult_class=1000, test_ratio=0.15, 
+                 train_file='train.txt', val_file='val.txt', test_file='test.txt',
+                 augment_count=1):  # Сколько аугментированных копий делать
+    X_train, y_train, X_val, y_val, X_test, y_test = [], [], [], [], [], []
     class_map = {name: idx for idx, name in enumerate(sorted(os.listdir(path)))}
     logger.info("Классы: %s", class_map)
-    
+
+    train_paths, val_paths, test_paths = [], [], []
+
     for label, idx in class_map.items():
         folder = os.path.join(path, label)
         images = os.listdir(folder)
         np.random.shuffle(images)
-        
-        # Устанавливаем лимит на количество изображений в зависимости от класса
-        if idx in [0, 1]:  # Для классов 0 и 1
+
+        # Ограничения по числу изображений
+        if idx in [0, 1]:
             images = images[:max_per_difficult_class]
-        elif idx in [2, 3]:  # Для классов 2 и 3
+        elif idx in [2, 3]:
             images = images[:max_per_class]
         else:
             logger.warning(f"Класс {idx} не обработан, пропускаем...")
             continue
 
-        for file in images:
-            img_path = os.path.join(folder, file)
-            img = preprocess_image(img_path)
-            X.append(img)
-            y.append(idx)
-            
-            # Аугментации для каждого оригинала
-            for a in augment_image(img, idx):  # Передаем индекс класса
-                X.append(a)
-                y.append(idx)
-    
-    return np.array(X), np.array(y), class_map
+        # Разделяем на train / val / test
+        num_test = int(len(images) * test_ratio)
+        num_val = int(len(images) * 0.15)
+        test_images = images[:num_test]
+        val_images = images[num_test:num_test + num_val]
+        train_images = images[num_test + num_val:]
 
-def save_npy_files(X, y, class_map, features_dir="features"):
-    os.makedirs(features_dir, exist_ok=True)
-    
-    np.save(os.path.join(features_dir, "X.npy"), X)
-    np.save(os.path.join(features_dir, "y.npy"), y)
-    with open(os.path.join("", "class_map.npy"), 'wb') as f:
-        np.save(f, class_map)
+        # Обработка и аугментация
+        def process_and_append(img_list, X, y, paths, label_idx, augment=False):
+            for img_name in img_list:
+                img_path = os.path.join(folder, img_name)
+                base_img = preprocess_image(img_path)
+                X.append(base_img)
+                y.append(label_idx)
+                paths.append(img_path)
 
-def load_npy_files(features_dir="features"):
-    X_path = os.path.join(features_dir, "X.npy")
-    y_path = os.path.join(features_dir, "y.npy")
-    class_map_path = os.path.join("", "class_map.npy")
-    
-    if os.path.exists(X_path) and os.path.exists(y_path) and os.path.exists(class_map_path):
-        X = np.load(X_path)
-        y = np.load(y_path)
-        with open(class_map_path, 'rb') as f:
-            class_map = np.load(f, allow_pickle=True).item()
-        return X, y, class_map
-    else:
-        return None, None, None
+                # Аугментация только для train
+                if augment:
+                    aug_images = augment_image(base_img, label_idx)
+                    for aug in aug_images[:augment_count]:
+                        X.append(aug)
+                        y.append(label_idx)
 
-def save_features(features, model_name, dataset_split, features_dir="features"):
-    os.makedirs(features_dir, exist_ok=True)
-    
-    np.save(os.path.join(features_dir, f"{model_name}_{dataset_split}_features.npy"), features)
+        process_and_append(train_images, X_train, y_train, train_paths, idx, augment=True)
+        process_and_append(val_images, X_val, y_val, val_paths, idx, augment=False)
+        process_and_append(test_images, X_test, y_test, test_paths, idx, augment=False)
 
-def load_features(model_name, dataset_split, features_dir="features"):
-    features_path = os.path.join(features_dir, f"{model_name}_{dataset_split}_features.npy")
-    
-    if os.path.exists(features_path):
-        return np.load(features_path)
-    else:
-        return None
+    # Сохраняем пути
+    def save_paths(paths, filename):
+        with open(filename, 'w') as f:
+            for path in paths:
+                f.write(path + '\n')
+
+    save_paths(train_paths, train_file)
+    save_paths(val_paths, val_file)
+    save_paths(test_paths, test_file)
+
+    return (
+        np.array(X_train), np.array(y_train),
+        np.array(X_val), np.array(y_val),
+        np.array(X_test), np.array(y_test),
+        class_map
+    )
 
 def extract_features(model, X, preprocess_fn, batch_size=32):
     features = []
     for i in range(0, len(X), batch_size):
         batch = X[i:i+batch_size]
         batch_prep = preprocess_fn(batch * 255.0)
-        feats = model.predict(batch_prep, verbose=0)
+
+        # Убедитесь, что используете GPU
+        with tf.device('/GPU:0'):
+            feats = model.predict(batch_prep, verbose=0)
+        
         features.extend([f.flatten() for f in feats])
         gc.collect()
     return np.array(features)
@@ -170,110 +181,44 @@ def plot_confusion_matrix(cm, class_names):
     plt.tight_layout()
     plt.show()
 
-# Bar charts for precision, recall, f1-score per class
-def plot_classification_report(report_dict):
-    metrics = ['precision', 'recall', 'f1-score']
-    labels = list(report_dict.keys())[:-3]  # Skip 'accuracy', 'macro avg', 'weighted avg']
-
-    x = np.arange(len(labels))
-    width = 0.25
-
-    # Values
-    precision = [report_dict[label]['precision'] for label in labels]
-    recall = [report_dict[label]['recall'] for label in labels]
-    f1 = [report_dict[label]['f1-score'] for label in labels]
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-
-    bars1 = ax.bar(x - width, precision, width, label='Precision', color='#1f77b4')
-    bars2 = ax.bar(x, recall, width, label='Recall', color='#2ca02c')
-    bars3 = ax.bar(x + width, f1, width, label='F1-score', color='#ff7f0e')
-
-    # Add value labels on top of bars
-    def add_labels(bars):
-        for bar in bars:
-            height = bar.get_height()
-            ax.annotate(f'{height:.2f}',
-                        xy=(bar.get_x() + bar.get_width() / 2, height),
-                        xytext=(0, 5),  # vertical offset
-                        textcoords="offset points",
-                        ha='center', va='bottom', fontsize=9)
-
-    add_labels(bars1)
-    add_labels(bars2)
-    add_labels(bars3)
-
-    # Add average lines
-    for metric_values, color in zip([precision, recall, f1], ['#1f77b4', '#2ca02c', '#ff7f0e']):
-        avg = np.mean(metric_values)
-        ax.axhline(avg, linestyle='--', color=color, alpha=0.3, label=f'{color.capitalize()} Avg: {avg:.2f}')
-
-    ax.set_ylabel('Score', fontsize=12)
-    ax.set_title('Classification Metrics per Class', fontsize=14, weight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha='right')
-    ax.set_ylim(0, 1.1)
-    ax.grid(axis='y', linestyle='--', alpha=0.3)
-    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=10)
-    plt.tight_layout()
-    plt.show()
-
 def main():
-    X, y, class_map = load_npy_files()
-    
-    if X is None or y is None or class_map is None:
-        X, y, class_map = load_dataset(DATASET_PATH)
-        save_npy_files(X, y, class_map)
+    # Загружаем данные
+    X_train, y_train, X_val, y_val, X_test, y_test, class_map = load_dataset(DATASET_PATH)
 
-    # Разделение на обучающие, валидационные и тестовые данные
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, stratify=y, test_size=0.2, random_state=SEED)
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, stratify=y_temp, test_size=0.5, random_state=SEED)
+    gpus = tf.config.list_physical_devices('GPU')
 
-    # Удаляем исходные данные из памяти после разделения
-    del X, y, X_temp, y_temp
+    if gpus:
+        print(f"✅ GPU доступен: {gpus}")
+    else:
+        print("⚠️ GPU не найден. Используется CPU.")
+    tf.config.set_visible_devices(gpus[0], 'GPU')
+
+    # Сохраняем class_map в текстовый файл
+    logger.info("Сохраняем class_map в файл...")
+    np.save('class_map.npy', class_map)
+
+    vgg = VGG16(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
+    xcep = Xception(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
+    with tf.device('/GPU:0'):  # /GPU:0 — первый доступный GPU
+        vgg_model = Model(inputs=vgg.input, outputs=vgg.output)
+        xcep_model = Model(inputs=xcep.input, outputs=xcep.output)
+
+    logger.info("Извлечение признаков VGG16...")
+    vgg_train = extract_features(vgg_model, X_train, vgg_preprocess)
+    vgg_val = extract_features(vgg_model, X_val, vgg_preprocess)
+    vgg_test = extract_features(vgg_model, X_test, vgg_preprocess)
+
+    # Удаляем модель VGG16 из памяти
+    del vgg, vgg_model
     gc.collect()
 
-    # Загружаем признаки, если они уже сохранены
-    logger.info("Загрузка признаков для VGG16 и Xception...")
+    logger.info("Извлечение признаков Xception...")
+    xcep_train = extract_features(xcep_model, X_train, xcep_preprocess)
+    xcep_val = extract_features(xcep_model, X_val, xcep_preprocess)
+    xcep_test = extract_features(xcep_model, X_test, xcep_preprocess)
 
-    vgg_train = load_features("vgg", "train")
-    vgg_val = load_features("vgg", "val")
-    vgg_test = load_features("vgg", "test")
-    xcep_train = load_features("xcep", "train")
-    xcep_val = load_features("xcep", "val")
-    xcep_test = load_features("xcep", "test")
-
-    if vgg_train is None or vgg_val is None or vgg_test is None or xcep_train is None or xcep_val is None or xcep_test is None:
-        logger.info("Извлечение признаков VGG16...")
-        vgg = VGG16(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
-        vgg_model = Model(inputs=vgg.input, outputs=vgg.output)
-        vgg_train = extract_features(vgg_model, X_train, vgg_preprocess)
-        vgg_val = extract_features(vgg_model, X_val, vgg_preprocess)
-        vgg_test = extract_features(vgg_model, X_test, vgg_preprocess)
-        save_features(vgg_train, "vgg", "train")
-        save_features(vgg_val, "vgg", "val")
-        save_features(vgg_test, "vgg", "test")
-
-        # Удаляем модель VGG16 из памяти
-        del vgg, vgg_model
-        gc.collect()
-
-        logger.info("Извлечение признаков Xception...")
-        xcep = Xception(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
-        xcep_model = Model(inputs=xcep.input, outputs=xcep.output)
-        xcep_train = extract_features(xcep_model, X_train, xcep_preprocess)
-        xcep_val = extract_features(xcep_model, X_val, xcep_preprocess)
-        xcep_test = extract_features(xcep_model, X_test, xcep_preprocess)
-        save_features(xcep_train, "xcep", "train")
-        save_features(xcep_val, "xcep", "val")
-        save_features(xcep_test, "xcep", "test")
-
-        # Удаляем модель Xception из памяти
-        del xcep, xcep_model
-        gc.collect()
-
-    # Удаляем исходные данные после извлечения признаков
-    del X_train, X_val, X_test
+    # Удаляем модель Xception из памяти
+    del xcep, xcep_model
     gc.collect()
 
     # Объединяем признаки
@@ -285,6 +230,7 @@ def main():
     del vgg_train, vgg_val, vgg_test, xcep_train, xcep_val, xcep_test
     gc.collect()
 
+    # Обучение XGBoost модели
     logger.info("Обучение XGBoost модели...")
     clf = XGBClassifier(
         n_estimators=100,
@@ -297,30 +243,31 @@ def main():
     )
     clf.fit(X_train_comb, y_train, eval_set=[(X_val_comb, y_val)], verbose=True)
 
-    # Удаляем объединенные признаки после обучения
-    del X_train_comb, X_val_comb
-    gc.collect()
-
+    # Оценка модели
     logger.info("Оценка модели...")
     y_pred = clf.predict(X_test_comb)
     cm = confusion_matrix(y_test, y_pred)
-    print("Confusion Matrix:")
-    print(cm)
+    logger.info("Confusion Matrix:")
+    logger.info(cm)
 
-    #Вывод отчета о классификации
+    # Вывод отчета о классификации
     report = classification_report(y_test, y_pred, target_names=class_map.keys())
-    print("\nClassification Report:")
-    print(report)
+    logger.info("\nClassification Report:")
+    logger.info(report)
 
-    # Удаляем тестовые данные после оценки
-    del X_test_comb, y_test, y_pred
-    gc.collect()
-
+    # Сохранение модели
     joblib.dump(clf, "xgb_model.pkl")
     logger.info("✅ Готово! Модель сохранена как xgb_model.pkl")
-
+    
     # Удаляем модель XGBoost из памяти
     del clf
+
+    clf = joblib.load(f"xgb_model.pkl")
+    y_pred = clf.predict(X_test_comb)
+    report = classification_report(y_test, y_pred, target_names=class_map.keys())
+    logger.info("\nClassification Report:")
+    logger.info(report)
+    
     gc.collect()
 
 if __name__ == "__main__":
