@@ -31,7 +31,7 @@ else:
     logger.warning("⚠️ GPU не найден. Используется CPU.")
 
 # === ПАРАМЕТРЫ ===
-IMG_SIZE = 128
+IMG_SIZE = 200
 DATASET_PATH = "grape_leaf_dataset"
 PART_OF_DATASET = 0.3  # используй только часть данных, чтобы не упасть по памяти
 SEED = 42
@@ -81,7 +81,7 @@ def augment_image(image, class_idx):
     image = np.expand_dims(image, 0)
     return [datagen.flow(image, batch_size=1).__next__()[0]]
 
-def load_dataset(path, max_per_class=500, max_per_difficult_class=1000):
+def load_dataset(path, max_per_class=750, max_per_difficult_class=1500):
     X, y = [], []
     class_map = {name: idx for idx, name in enumerate(sorted(os.listdir(path)))}
     logger.info("Классы: %s", class_map)
@@ -214,7 +214,7 @@ def plot_classification_report(report_dict):
     ax.set_xticklabels(labels, rotation=45, ha='right')
     ax.set_ylim(0, 1.1)
     ax.grid(axis='y', linestyle='--', alpha=0.3)
-    ax.legend(loc='upper right', fontsize=10)
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=10)
     plt.tight_layout()
     plt.show()
 
@@ -225,27 +225,33 @@ def main():
         X, y, class_map = load_dataset(DATASET_PATH)
         save_npy_files(X, y, class_map)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=SEED)
+    # Разделение на обучающие, валидационные и тестовые данные
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, stratify=y, test_size=0.2, random_state=SEED)
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, stratify=y_temp, test_size=0.5, random_state=SEED)
 
     # Удаляем исходные данные из памяти после разделения
-    del X, y
+    del X, y, X_temp, y_temp
     gc.collect()
 
     # Загружаем признаки, если они уже сохранены
     logger.info("Загрузка признаков для VGG16 и Xception...")
 
     vgg_train = load_features("vgg", "train")
+    vgg_val = load_features("vgg", "val")
     vgg_test = load_features("vgg", "test")
     xcep_train = load_features("xcep", "train")
+    xcep_val = load_features("xcep", "val")
     xcep_test = load_features("xcep", "test")
 
-    if vgg_train is None or vgg_test is None or xcep_train is None or xcep_test is None:
+    if vgg_train is None or vgg_val is None or vgg_test is None or xcep_train is None or xcep_val is None or xcep_test is None:
         logger.info("Извлечение признаков VGG16...")
         vgg = VGG16(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
         vgg_model = Model(inputs=vgg.input, outputs=vgg.output)
         vgg_train = extract_features(vgg_model, X_train, vgg_preprocess)
+        vgg_val = extract_features(vgg_model, X_val, vgg_preprocess)
         vgg_test = extract_features(vgg_model, X_test, vgg_preprocess)
         save_features(vgg_train, "vgg", "train")
+        save_features(vgg_val, "vgg", "val")
         save_features(vgg_test, "vgg", "test")
 
         # Удаляем модель VGG16 из памяти
@@ -256,8 +262,10 @@ def main():
         xcep = Xception(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
         xcep_model = Model(inputs=xcep.input, outputs=xcep.output)
         xcep_train = extract_features(xcep_model, X_train, xcep_preprocess)
+        xcep_val = extract_features(xcep_model, X_val, xcep_preprocess)
         xcep_test = extract_features(xcep_model, X_test, xcep_preprocess)
         save_features(xcep_train, "xcep", "train")
+        save_features(xcep_val, "xcep", "val")
         save_features(xcep_test, "xcep", "test")
 
         # Удаляем модель Xception из памяти
@@ -265,15 +273,16 @@ def main():
         gc.collect()
 
     # Удаляем исходные данные после извлечения признаков
-    del X_train, X_test
+    del X_train, X_val, X_test
     gc.collect()
 
     # Объединяем признаки
     X_train_comb = np.concatenate([vgg_train, xcep_train], axis=1)
+    X_val_comb = np.concatenate([vgg_val, xcep_val], axis=1)
     X_test_comb = np.concatenate([vgg_test, xcep_test], axis=1)
 
     # Удаляем признаки после объединения
-    del vgg_train, vgg_test, xcep_train, xcep_test
+    del vgg_train, vgg_val, vgg_test, xcep_train, xcep_val, xcep_test
     gc.collect()
 
     logger.info("Обучение XGBoost модели...")
@@ -286,19 +295,22 @@ def main():
         device='cuda',
         n_jobs=-1
     )
-    clf.fit(X_train_comb, y_train)
+    clf.fit(X_train_comb, y_train, eval_set=[(X_val_comb, y_val)], verbose=True)
 
     # Удаляем объединенные признаки после обучения
-    del X_train_comb
+    del X_train_comb, X_val_comb
     gc.collect()
 
     logger.info("Оценка модели...")
     y_pred = clf.predict(X_test_comb)
     cm = confusion_matrix(y_test, y_pred)
-    plot_confusion_matrix(cm, list(class_map.keys()))
+    print("Confusion Matrix:")
+    print(cm)
 
-    report = classification_report(y_test, y_pred, target_names=class_map.keys(), output_dict=True)
-    plot_classification_report(report)
+    #Вывод отчета о классификации
+    report = classification_report(y_test, y_pred, target_names=class_map.keys())
+    print("\nClassification Report:")
+    print(report)
 
     # Удаляем тестовые данные после оценки
     del X_test_comb, y_test, y_pred
