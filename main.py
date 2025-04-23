@@ -261,12 +261,6 @@ def main():
     
     # Удаляем модель XGBoost из памяти
     del clf
-
-    clf = joblib.load(f"xgb_model.pkl")
-    y_pred = clf.predict(X_test_comb)
-    report = classification_report(y_test, y_pred, target_names=class_map.keys())
-    logger.info("\nClassification Report:")
-    logger.info(report)
     
     gc.collect()
 
