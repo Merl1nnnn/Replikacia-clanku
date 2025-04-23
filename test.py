@@ -21,7 +21,7 @@ np.random.seed(SEED)
 
 # Загрузка модели и class map
 model = joblib.load(f"xgb_model{loading_str}.pkl")
-class_map = np.load(f"features{loading_str}/class_map.npy", allow_pickle=True).item()
+class_map = np.load("class_map.npy", allow_pickle=True).item()
 id_to_class = {v: k for k, v in class_map.items()}
 class_to_id = {v: k for k, v in id_to_class.items()}
 
