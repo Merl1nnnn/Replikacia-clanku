@@ -124,7 +124,7 @@ def save_npy_files(X, y, class_map, features_dir="features"):
 def load_npy_files(features_dir="features"):
     X_path = os.path.join(features_dir, "X.npy")
     y_path = os.path.join(features_dir, "y.npy")
-    class_map_path = os.path.join(features_dir, "class_map.npy")
+    class_map_path = os.path.join("", "class_map.npy")
     
     if os.path.exists(X_path) and os.path.exists(y_path) and os.path.exists(class_map_path):
         X = np.load(X_path)
